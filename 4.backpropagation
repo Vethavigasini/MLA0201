@@ -1,0 +1,270 @@
+import csv
+import os
+import math
+import random
+
+# -----------------------------
+# Utils
+# -----------------------------
+def sigmoid(x):
+    # stable sigmoid
+    if x >= 0:
+        z = math.exp(-x)
+        return 1 / (1 + z)
+    else:
+        z = math.exp(x)
+        return z / (1 + z)
+
+def dsigmoid(y):
+    # derivative using output y = sigmoid(x)
+    return y * (1 - y)
+
+def dot(a, b):
+    return sum(x*y for x, y in zip(a, b))
+
+def add_vec(a, b):
+    return [x+y for x, y in zip(a, b)]
+
+def sub_vec(a, b):
+    return [x-y for x, y in zip(a, b)]
+
+def mul_scalar(v, s):
+    return [x*s for x in v]
+
+def mat_vec(M, v):
+    return [dot(row, v) for row in M]
+
+def transpose(M):
+    return list(map(list, zip(*M)))
+
+def zeros(r, c):
+    return [[0.0]*c for _ in range(r)]
+
+def rand_matrix(r, c, scale=0.1):
+    return [[(random.random()*2-1)*scale for _ in range(c)] for _ in range(r)]
+
+# -----------------------------
+# CSV loader
+# last column = target
+# -----------------------------
+def load_csv_numeric(path):
+    with open(path, "r", newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        rows = []
+        for r in reader:
+            if not r:
+                continue
+            rows.append([float(x.strip()) for x in r])
+    return header, rows
+
+def minmax_scale(X):
+    # X: list of samples (n x d)
+    d = len(X[0])
+    mins = [min(row[j] for row in X) for j in range(d)]
+    maxs = [max(row[j] for row in X) for j in range(d)]
+    scaled = []
+    for row in X:
+        newr = []
+        for j in range(d):
+            denom = (maxs[j] - mins[j])
+            if denom == 0:
+                newr.append(0.0)
+            else:
+                newr.append((row[j] - mins[j]) / denom)
+        scaled.append(newr)
+    return scaled, mins, maxs
+
+def train_test_split(data, test_ratio=0.2, seed=42):
+    random.seed(seed)
+    data = data[:]
+    random.shuffle(data)
+    n_test = int(len(data) * test_ratio)
+    test = data[:n_test]
+    train = data[n_test:]
+    return train, test
+
+# -----------------------------
+# Neural Network (1 hidden layer)
+# -----------------------------
+class ANN:
+    # input -> hidden -> output (binary)
+    def __init__(self, n_in, n_hidden, lr=0.1):
+        self.n_in = n_in
+        self.n_hidden = n_hidden
+        self.n_out = 1
+        self.lr = lr
+
+        # weights: W1 (hidden x input), b1 (hidden)
+        #          W2 (out x hidden), b2 (out)
+        self.W1 = rand_matrix(n_hidden, n_in, scale=0.5)
+        self.b1 = [(random.random()*2-1)*0.5 for _ in range(n_hidden)]
+        self.W2 = rand_matrix(1, n_hidden, scale=0.5)
+        self.b2 = [(random.random()*2-1)*0.5]
+
+    def forward(self, x):
+        # hidden pre-activation and activation
+        z1 = add_vec(mat_vec(self.W1, x), self.b1)
+        a1 = [sigmoid(v) for v in z1]
+
+        # output
+        z2 = add_vec(mat_vec(self.W2, a1), self.b2)
+        a2 = sigmoid(z2[0])  # scalar in [0,1]
+        return a1, a2
+
+    def train_one(self, x, y):
+        # forward
+        a1, yhat = self.forward(x)
+
+        # error (MSE loss: 0.5*(y-yhat)^2)
+        # delta2 = (yhat - y) * sigmoid'(z2)
+        delta2 = (yhat - y) * dsigmoid(yhat)  # scalar
+
+        # gradients for W2, b2
+        # dW2 = delta2 * a1
+        dW2 = [[delta2 * h for h in a1]]  # (1 x hidden)
+        db2 = [delta2]
+
+        # backprop to hidden
+        # delta1_j = (W2^T * delta2)_j * sigmoid'(a1_j)
+        # W2 is 1 x hidden => W2^T is hidden x 1
+        delta1 = []
+        for j in range(self.n_hidden):
+            w2j = self.W2[0][j]
+            delta1.append((w2j * delta2) * dsigmoid(a1[j]))
+
+        # gradients for W1, b1
+        dW1 = []
+        for j in range(self.n_hidden):
+            dW1.append([delta1[j] * xi for xi in x])  # (hidden x input)
+        db1 = delta1[:]  # (hidden)
+
+        # update weights (gradient descent)
+        for i in range(self.n_hidden):
+            for k in range(self.n_in):
+                self.W1[i][k] -= self.lr * dW1[i][k]
+            self.b1[i] -= self.lr * db1[i]
+
+        for j in range(self.n_hidden):
+            self.W2[0][j] -= self.lr * dW2[0][j]
+        self.b2[0] -= self.lr * db2[0]
+
+        return 0.5 * (y - yhat) * (y - yhat)
+
+    def predict_prob(self, x):
+        _, yhat = self.forward(x)
+        return yhat
+
+    def predict(self, x, threshold=0.5):
+        return 1 if self.predict_prob(x) >= threshold else 0
+
+# -----------------------------
+# Metrics
+# -----------------------------
+def accuracy(model, data):
+    correct = 0
+    for x, y in data:
+        if model.predict(x) == int(y):
+            correct += 1
+    return correct / len(data)
+
+def confusion_matrix(model, data):
+    tp = tn = fp = fn = 0
+    for x, y in data:
+        pred = model.predict(x)
+        y = int(y)
+        if pred == 1 and y == 1: tp += 1
+        elif pred == 0 and y == 0: tn += 1
+        elif pred == 1 and y == 0: fp += 1
+        elif pred == 0 and y == 1: fn += 1
+    return tp, tn, fp, fn
+
+# -----------------------------
+# MAIN: find diabetes.csv automatically
+# -----------------------------
+filename = "diabetes.csv"
+possible_paths = [
+    filename,
+    os.path.join(os.getcwd(), filename),
+    os.path.join(os.path.expanduser("~"), "Downloads", filename),
+    os.path.join(os.path.expanduser("~"), "Documents", filename),
+    os.path.join(os.path.expanduser("~"), "Desktop", filename),
+]
+
+csv_path = None
+for p in possible_paths:
+    if os.path.exists(p):
+        csv_path = p
+        break
+
+if csv_path is None:
+    print("ERROR: diabetes.csv not found.")
+    print("Put diabetes.csv in same folder OR Downloads/Documents/Desktop.")
+    print("Checked paths:")
+    for p in possible_paths:
+        print(" -", p)
+else:
+    header, rows = load_csv_numeric(csv_path)
+
+    # split into X and y (last column)
+    X = [r[:-1] for r in rows]
+    y = [r[-1] for r in rows]
+
+    # normalize features
+    X_scaled, mins, maxs = minmax_scale(X)
+
+    # make dataset pairs
+    dataset = list(zip(X_scaled, y))
+
+    train_data, test_data = train_test_split(dataset, test_ratio=0.2, seed=42)
+
+    n_in = len(X_scaled[0])
+    n_hidden = 8         # you can change: 6, 8, 10
+    lr = 0.2             # you can change: 0.1, 0.2
+    epochs = 500         # you can change: 300, 500, 1000
+
+    model = ANN(n_in=n_in, n_hidden=n_hidden, lr=lr)
+
+    print("Using dataset:", csv_path)
+    print("Features:", header[:-1])
+    print("Target:", header[-1])
+    print("Train size:", len(train_data), " Test size:", len(test_data))
+    print("\nTraining...")
+
+    for ep in range(1, epochs + 1):
+        total_loss = 0.0
+        random.shuffle(train_data)
+        for x_i, y_i in train_data:
+            total_loss += model.train_one(x_i, y_i)
+
+        if ep % 50 == 0:
+            acc_tr = accuracy(model, train_data)
+            acc_te = accuracy(model, test_data)
+            print("Epoch:", ep, " Loss:", round(total_loss, 4),
+                  " TrainAcc:", round(acc_tr, 4),
+                  " TestAcc:", round(acc_te, 4))
+
+    print("\n--- FINAL EVALUATION ---")
+    acc_tr = accuracy(model, train_data)
+    acc_te = accuracy(model, test_data)
+    print("Train Accuracy:", round(acc_tr * 100, 2), "%")
+    print("Test  Accuracy:", round(acc_te * 100, 2), "%")
+
+    tp, tn, fp, fn = confusion_matrix(model, test_data)
+    print("\nConfusion Matrix (Test):")
+    print("TP:", tp, " TN:", tn, " FP:", fp, " FN:", fn)
+
+    # classify one new sample (example input)
+    # Put your own values here in the same feature order as the CSV (except target)
+    # Values must be numeric; we normalize using training min/max from the dataset.
+    sample_raw = [6, 148, 72, 35, 0, 33.6, 0.627, 50]  # typical diabetes sample
+    sample_scaled = []
+    for j, v in enumerate(sample_raw):
+        denom = (maxs[j] - mins[j])
+        sample_scaled.append(0.0 if denom == 0 else (v - mins[j]) / denom)
+
+    prob = model.predict_prob(sample_scaled)
+    pred = model.predict(sample_scaled)
+    print("\nNew Sample:", sample_raw)
+    print("Predicted Probability:", round(prob, 4))
+    print("Predicted Class (0=No, 1=Yes):", pred)
